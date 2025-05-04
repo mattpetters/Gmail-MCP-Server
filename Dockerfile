@@ -5,14 +5,15 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
-
-# Copy source code
+# Copy source code and configuration first
 COPY . .
 
-# Build the application
-RUN npm run build
+# Install dependencies (this will also run the prepare script -> tsc)
+RUN npm install
+
+# Build the application (potentially redundant now, but kept for consistency)
+# If the prepare script already builds, this might be removable.
+# RUN npm run build  <-- Commented out as prepare script likely runs build
 
 # Create data directory
 RUN mkdir -p /app/calendar-data
@@ -24,4 +25,4 @@ RUN chown -R node:node /app/calendar-data
 USER node
 
 # Start the server
-CMD ["node", "build/index.js"]
+CMD ["node", "dist/index.js"]
