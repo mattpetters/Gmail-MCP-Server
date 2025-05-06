@@ -443,7 +443,10 @@ async function main() {
     server.tool("search_emails",
         // Raw schema definition
         {
-            query: z.string().describe("Gmail search query (e.g., 'from:example@gmail.com')"),
+            query: z.string().describe(
+                "Gmail search query (e.g., \'from:example@gmail.com\'). " +
+                "IMPORTANT: Do NOT use \'sort:recent\', the API returns newest first by default."
+            ),
             maxResults: z.number().optional().describe("Maximum number of results to return"),
         },
         // Callback with single destructured args parameter
