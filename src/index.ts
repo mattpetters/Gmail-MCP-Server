@@ -444,8 +444,8 @@ async function main() {
         // Raw schema definition
         {
             query: z.string().describe(
-                "Gmail search query (e.g., \'from:example@gmail.com\'). " +
-                "IMPORTANT: Do NOT use \'sort:recent\', the API returns newest first by default."
+                "Gmail search query (e.g., 'from:example@gmail.com'). " +
+                "If you need to sort by date, use 'after:<date>'"
             ),
             maxResults: z.number().optional().describe("Maximum number of results to return"),
         },
@@ -453,27 +453,66 @@ async function main() {
         async ({ query, maxResults }) => {
             logger.info({ tool: 'search_emails', args: { query, maxResults } }, 'Handling search_emails request');
             try {
-                const response = await gmail.users.messages.list({
+                // --- Server-side fix: Remove 'sort:recent' --- 
+                let processedQuery = query;
+                const sortRecentRegex = /\s*sort:recent\s*/gi; 
+                if (sortRecentRegex.test(processedQuery)) {
+                    processedQuery = processedQuery.replace(sortRecentRegex, ' ').trim(); 
+                    logger.warn({ tool: 'search_emails', originalQuery: query, processedQuery }, "Removed 'sort:recent' from query string.");
+                }
+                if (!processedQuery) {
+                    logger.warn({ tool: 'search_emails', originalQuery: query }, "Query became empty after removing 'sort:recent', defaulting to 'in:inbox'.");
+                    processedQuery = 'in:inbox'; 
+                }
+                // -----------------------------------------------
+
+                const listResponse = await gmail.users.messages.list({
                     userId: 'me',
-                    q: query,
-                    maxResults: maxResults || 10,
+                    q: processedQuery, 
+                    maxResults: maxResults || 10, // Use provided maxResults or default
                 });
 
-                const messages = response.data.messages || [];
-                logger.debug({ tool: 'search_emails', apiResponseCount: messages.length, estimatedResultCount: response.data.resultSizeEstimate }, 'Gmail API list response received');
+                const messages = listResponse.data.messages || [];
+                logger.debug({ tool: 'search_emails', apiResponseCount: messages.length, estimatedResultCount: listResponse.data.resultSizeEstimate }, 'Gmail API list response received');
 
                 if (messages.length === 0) {
                     return { content: [{ type: "text" as const, text: "No messages found matching the query." }] };
                 }
 
-                const resultsText = messages
-                    .map(msg => `Message ID: ${msg.id || 'N/A'}${msg.threadId ? `, Thread ID: ${msg.threadId}` : ''}`)
-                    .join('\n');
+                // --- Fetch details for each message ---
+                let resultsText = `Found ${messages.length} messages:\n`;
+                const messageDetailsPromises = messages.map(async (msg) => {
+                    if (!msg.id) return null; // Skip if no ID
+                    try {
+                        const msgGetResponse = await gmail.users.messages.get({
+                            userId: 'me',
+                            id: msg.id,
+                            format: 'metadata', // More efficient than 'full'
+                            metadataHeaders: ['Subject', 'From', 'Date'] // Request specific headers
+                        });
+
+                        const headers = msgGetResponse.data.payload?.headers || [];
+                        const subject = headers.find(h => h.name?.toLowerCase() === 'subject')?.value || 'No Subject';
+                        const from = headers.find(h => h.name?.toLowerCase() === 'from')?.value || 'Unknown Sender';
+                        const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || 'Unknown Date';
+
+                        return `Message ID: ${msg.id}, From: ${from}, Date: ${date}, Subject: ${subject}`;
+                    } catch (error) {
+                        logger.error({ tool: 'search_emails', messageId: msg.id, error }, "Error getting metadata for message");
+                        // Safely access error message
+                        const errorMessage = error instanceof Error ? error.message : String(error);
+                        return `Message ID: ${msg.id} - Error retrieving details: ${errorMessage}`; 
+                    }
+                });
+
+                const messageDetails = await Promise.all(messageDetailsPromises);
+                resultsText += messageDetails.filter(detail => detail !== null).join('\n');
+                // ---------------------------------------
 
                 return {
                     content: [{
                         type: "text" as const,
-                        text: `Found ${messages.length} messages:\n${resultsText}`,
+                        text: resultsText,
                     }],
                 };
             } catch (error: any) {
