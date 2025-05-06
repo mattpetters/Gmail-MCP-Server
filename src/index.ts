@@ -480,39 +480,47 @@ async function main() {
                 }
 
                 // --- Fetch details for each message ---
-                let resultsText = `Found ${messages.length} messages:\n`;
+                // Initialize an array to hold the structured email details
+                const emailDetailsArray: Array<{ messageId: string; from: string; date: string; subject: string; error?: string }> = [];
+
                 const messageDetailsPromises = messages.map(async (msg) => {
-                    if (!msg.id) return null; // Skip if no ID
+                    if (!msg.id) return; // Skip if no ID
                     try {
                         const msgGetResponse = await gmail.users.messages.get({
                             userId: 'me',
                             id: msg.id,
-                            format: 'metadata', // More efficient than 'full'
-                            metadataHeaders: ['Subject', 'From', 'Date'] // Request specific headers
+                            format: 'metadata', 
+                            metadataHeaders: ['Subject', 'From', 'Date']
                         });
 
                         const headers = msgGetResponse.data.payload?.headers || [];
                         const subject = headers.find(h => h.name?.toLowerCase() === 'subject')?.value || 'No Subject';
                         const from = headers.find(h => h.name?.toLowerCase() === 'from')?.value || 'Unknown Sender';
                         const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || 'Unknown Date';
+                        
+                        // Add the structured object to the array
+                        emailDetailsArray.push({ messageId: msg.id, from, date, subject });
 
-                        return `Message ID: ${msg.id}, From: ${from}, Date: ${date}, Subject: ${subject}`;
                     } catch (error) {
                         logger.error({ tool: 'search_emails', messageId: msg.id, error }, "Error getting metadata for message");
-                        // Safely access error message
+                        // Add error information for this specific email to the array
                         const errorMessage = error instanceof Error ? error.message : String(error);
-                        return `Message ID: ${msg.id} - Error retrieving details: ${errorMessage}`; 
+                        emailDetailsArray.push({ messageId: msg.id, from: 'Error', date: 'Error', subject: 'Error retrieving details', error: errorMessage });
                     }
                 });
 
-                const messageDetails = await Promise.all(messageDetailsPromises);
-                resultsText += messageDetails.filter(detail => detail !== null).join('\n');
-                // ---------------------------------------
+                // Wait for all message detail fetches to complete
+                await Promise.all(messageDetailsPromises);
+                
+                // --- Format the final response as JSON string ---
+                const resultsJsonString = JSON.stringify(emailDetailsArray);
+                // ------------------------------------------------
 
                 return {
                     content: [{
                         type: "text" as const,
-                        text: resultsText,
+                        // Return the JSON string as the text content
+                        text: resultsJsonString, 
                     }],
                 };
             } catch (error: any) {
