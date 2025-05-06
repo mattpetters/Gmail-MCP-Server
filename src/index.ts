@@ -11,13 +11,15 @@ import { fileURLToPath } from 'url';
 import http from 'http';
 import open from 'open';
 import os from 'os';
-import {createEmailMessage} from "./utl.js";
+import { createEmailMessage } from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import express from "express";
 import { Request, Response } from "express";
-import { randomUUID } from "crypto";    
+import { randomUUID } from "crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { pino } from 'pino';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 // Configuration paths
 const CONFIG_DIR = path.join(os.homedir(), '.gmail-mcp');
@@ -93,7 +95,7 @@ function extractEmailContent(messagePart: GmailMessagePart): EmailContent {
 async function loadCredentials() {
     try {
         // Create config directory if it doesn't exist
-        if (!process.env.GMAIL_OAUTH_PATH && !CREDENTIALS_PATH &&!fs.existsSync(CONFIG_DIR)) {
+        if (!process.env.GMAIL_OAUTH_PATH && !CREDENTIALS_PATH && !fs.existsSync(CONFIG_DIR)) {
             fs.mkdirSync(CONFIG_DIR, { recursive: true });
         }
 
@@ -104,11 +106,11 @@ async function loadCredentials() {
         if (fs.existsSync(localOAuthPath)) {
             // If found in current directory, copy to config directory
             fs.copyFileSync(localOAuthPath, OAUTH_PATH);
-            console.log('OAuth keys found in current directory, copied to global config.');
+            logger.info('OAuth keys found in current directory, copied to global config.');
         }
 
         if (!fs.existsSync(OAUTH_PATH)) {
-            console.error('Error: OAuth keys file not found. Please place gcp-oauth.keys.json in current directory or', CONFIG_DIR);
+            logger.error('Error: OAuth keys file not found. Please place gcp-oauth.keys.json in current directory or', CONFIG_DIR);
             process.exit(1);
         }
 
@@ -116,13 +118,13 @@ async function loadCredentials() {
         const keys = keysContent.installed || keysContent.web;
 
         if (!keys) {
-            console.error('Error: Invalid OAuth keys file format. File should contain either "installed" or "web" credentials.');
+            logger.error('Error: Invalid OAuth keys file format. File should contain either "installed" or "web" credentials.');
             process.exit(1);
         }
 
-        const callback = process.argv[2] === 'auth' && process.argv[3] 
-        ? process.argv[3] 
-        : "http://localhost:3000/oauth2callback";
+        const callback = process.argv[2] === 'auth' && process.argv[3]
+            ? process.argv[3]
+            : "http://localhost:3000/oauth2callback";
 
         oauth2Client = new OAuth2Client(
             keys.client_id,
@@ -135,7 +137,7 @@ async function loadCredentials() {
             oauth2Client.setCredentials(credentials);
         }
     } catch (error) {
-        console.error('Error loading credentials:', error);
+        logger.error('Error loading credentials:', error);
         process.exit(1);
     }
 }
@@ -150,7 +152,7 @@ async function authenticate() {
             scope: ['https://www.googleapis.com/auth/gmail.modify'],
         });
 
-        console.log('Please visit this URL to authenticate:', authUrl);
+        logger.info('Please visit this URL to authenticate:', authUrl);
         open(authUrl);
 
         server.on('request', async (req, res) => {
@@ -178,6 +180,7 @@ async function authenticate() {
             } catch (error) {
                 res.writeHead(500);
                 res.end('Authentication failed');
+                logger.error('Authentication failed:', error);
                 reject(error);
             }
         });
@@ -262,7 +265,7 @@ async function main() {
 
     if (process.argv[2] === 'auth') {
         await authenticate();
-        console.log('Authentication completed successfully');
+        logger.info('Authentication completed successfully');
         process.exit(0);
     }
 
@@ -286,7 +289,7 @@ async function main() {
         // Note: createEmailMessage needs modification to include these headers properly based on inReplyTo
         if (args.inReplyTo) {
             // This part needs modification in createEmailMessage to add correct headers
-             console.warn("In-Reply-To handling needs adjustment in createEmailMessage");
+            logger.warn("In-Reply-To handling needs adjustment in createEmailMessage");
         }
 
 
@@ -313,14 +316,14 @@ async function main() {
                 const results = await processFn(batch);
                 successes.push(...results);
             } catch (error) {
-                 console.error(`Batch failed (index ${i}):`, error); // Log batch error
+                logger.error({ error, batchIndex: i }, `Batch failed (index ${i})`);
                 // If batch fails, try individual items
                 for (const item of batch) {
                     try {
                         const result = await processFn([item]); // Process as a batch of one
                         successes.push(...result);
                     } catch (itemError) {
-                        console.error(`Item failed within batch:`, item, itemError); // Log item error
+                        logger.error({ item, error: itemError }, `Item failed within batch`);
                         failures.push({ item, error: itemError as Error });
                     }
                 }
@@ -331,9 +334,9 @@ async function main() {
 
     // --- Register Tools using server.tool() following the example pattern ---
 
-    server.tool("send_email", 
+    server.tool("send_email",
         // Raw schema definition
-        { 
+        {
             to: z.array(z.string()).describe("List of recipient email addresses"),
             subject: z.string().describe("Email subject"),
             body: z.string().describe("Email body content"),
@@ -343,15 +346,19 @@ async function main() {
             inReplyTo: z.string().optional().describe("Message ID being replied to"),
         },
         // Callback with single args parameter
-        async (args) => { 
+        async (args) => {
+            logger.info({ tool: 'send_email', args }, 'Handling send_email request');
             try {
                 return await handleEmailAction("send", args);
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error sending email: ${error.message}` }], isError: true }; }
+            } catch (error: any) {
+                logger.error({ tool: 'send_email', error, args }, 'Error sending email');
+                return { content: [{ type: "text" as const, text: `Error sending email: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("draft_email", 
+    server.tool("draft_email",
         // Raw schema definition
-        { 
+        {
             to: z.array(z.string()).describe("List of recipient email addresses"),
             subject: z.string().describe("Email subject"),
             body: z.string().describe("Email body content"),
@@ -361,19 +368,24 @@ async function main() {
             inReplyTo: z.string().optional().describe("Message ID being replied to"),
         },
         // Callback with single args parameter
-        async (args) => { 
+        async (args) => {
+            logger.info({ tool: 'draft_email', args }, 'Handling draft_email request');
             try {
                 return await handleEmailAction("draft", args);
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error drafting email: ${error.message}` }], isError: true }; }
+            } catch (error: any) {
+                logger.error({ tool: 'draft_email', error, args }, 'Error drafting email');
+                return { content: [{ type: "text" as const, text: `Error drafting email: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("read_email", 
+    server.tool("read_email",
         // Raw schema definition
-        { 
+        {
             messageId: z.string().describe("ID of the email message to retrieve"),
         },
         // Callback with single destructured args parameter
         async ({ messageId }) => {
+            logger.info({ tool: 'read_email', args: { messageId } }, 'Handling read_email request');
             try {
                 const response = await gmail.users.messages.get({
                     userId: 'me',
@@ -422,10 +434,13 @@ async function main() {
                         text: `Thread ID: ${threadId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
                     }],
                 };
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error reading email: ${error.message}` }], isError: true }; }
+            } catch (error: any) {
+                logger.error({ tool: 'read_email', error, args: { messageId } }, 'Error reading email');
+                return { content: [{ type: "text" as const, text: `Error reading email: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("search_emails", 
+    server.tool("search_emails",
         // Raw schema definition
         {
             query: z.string().describe("Gmail search query (e.g., 'from:example@gmail.com')"),
@@ -433,6 +448,7 @@ async function main() {
         },
         // Callback with single destructured args parameter
         async ({ query, maxResults }) => {
+            logger.info({ tool: 'search_emails', args: { query, maxResults } }, 'Handling search_emails request');
             try {
                 const response = await gmail.users.messages.list({
                     userId: 'me',
@@ -441,69 +457,47 @@ async function main() {
                 });
 
                 const messages = response.data.messages || [];
+                logger.debug({ tool: 'search_emails', apiResponseCount: messages.length, estimatedResultCount: response.data.resultSizeEstimate }, 'Gmail API list response received');
+
                 if (messages.length === 0) {
-                     return { content: [{ type: "text" as const, text: "No messages found matching the query." }] };
+                    return { content: [{ type: "text" as const, text: "No messages found matching the query." }] };
                 }
 
-                const results = await Promise.all(
-                    messages.map(async (msg) => {
-                        if (!msg.id) return null; // Skip if no message ID
-                        try {
-                             const detail = await gmail.users.messages.get({
-                                userId: 'me',
-                                id: msg.id,
-                                format: 'metadata',
-                                metadataHeaders: ['Subject', 'From', 'Date'],
-                            });
-                            const headers = detail.data.payload?.headers || [];
-                            return {
-                                id: msg.id,
-                                subject: headers.find(h => h.name?.toLowerCase() === 'subject')?.value || '(No Subject)',
-                                from: headers.find(h => h.name?.toLowerCase() === 'from')?.value || '(Unknown Sender)',
-                                date: headers.find(h => h.name?.toLowerCase() === 'date')?.value || '(Unknown Date)',
-                            };
-                        } catch (detailError) {
-                            console.error(`Failed to get details for message ${msg.id}:`, detailError);
-                            return { id: msg.id, subject: '(Error fetching details)', from: '', date: '' }; // Indicate error for this message
-                        }
-                    })
-                );
-
-                const validResults = results.filter(r => r !== null); // Filter out nulls if any messages lacked IDs initially
-
-                 if (validResults.length === 0) {
-                     return { content: [{ type: "text" as const, text: "No messages found or details could not be retrieved." }] };
-                }
+                const resultsText = messages
+                    .map(msg => `Message ID: ${msg.id || 'N/A'}${msg.threadId ? `, Thread ID: ${msg.threadId}` : ''}`)
+                    .join('\n');
 
                 return {
                     content: [{
                         type: "text" as const,
-                        text: "Found messages:\n" + validResults.map(r =>
-                            `ID: ${r!.id}\nSubject: ${r!.subject}\nFrom: ${r!.from}\nDate: ${r!.date}\n`
-                        ).join('\n'),
+                        text: `Found ${messages.length} messages:\n${resultsText}`,
                     }],
                 };
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error searching emails: ${error.message}` }], isError: true }; }
+            } catch (error: any) {
+                logger.error({ tool: 'search_emails', error, args: { query, maxResults } }, 'Error searching emails');
+                return { content: [{ type: "text" as const, text: `Error searching emails: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("modify_email", 
+    server.tool("modify_email",
         // Raw schema definition
         {
             messageId: z.string().describe("ID of the email message to modify"),
-            labelIds: z.array(z.string()).optional().describe("[Deprecated] Use addLabelIds instead"), 
+            labelIds: z.array(z.string()).optional().describe("[Deprecated] Use addLabelIds instead"),
             addLabelIds: z.array(z.string()).optional().describe("List of label IDs to add to the message"),
             removeLabelIds: z.array(z.string()).optional().describe("List of label IDs to remove from the message"),
         },
         // Callback with single args parameter
-        async (args) => { 
+        async (args) => {
+            logger.info({ tool: 'modify_email', args }, 'Handling modify_email request');
             try {
                 const requestBody: { addLabelIds?: string[]; removeLabelIds?: string[] } = {};
-                 // Prefer addLabelIds/removeLabelIds if provided, fallback to labelIds for adding only (legacy?)
+                // Prefer addLabelIds/removeLabelIds if provided, fallback to labelIds for adding only (legacy?)
                 if (args.addLabelIds && args.addLabelIds.length > 0) {
                     requestBody.addLabelIds = args.addLabelIds;
                 } else if (args.labelIds && args.labelIds.length > 0) {
-                     console.warn("Using deprecated 'labelIds' for adding labels in modify_email. Prefer 'addLabelIds'.");
-                     requestBody.addLabelIds = args.labelIds;
+                    logger.warn({ tool: 'modify_email', args }, "Using deprecated 'labelIds' for adding labels in modify_email. Prefer 'addLabelIds'.");
+                    requestBody.addLabelIds = args.labelIds;
                 }
 
                 if (args.removeLabelIds && args.removeLabelIds.length > 0) {
@@ -520,60 +514,72 @@ async function main() {
                     requestBody: requestBody,
                 });
                 return { content: [{ type: "text" as const, text: `Email ${args.messageId} labels updated successfully` }] };
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error modifying email: ${error.message}` }], isError: true }; }
+            } catch (error: any) {
+                logger.error({ tool: 'modify_email', error, args }, 'Error modifying email');
+                return { content: [{ type: "text" as const, text: `Error modifying email: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("delete_email", 
+    server.tool("delete_email",
         // Raw schema definition
-        { 
-            messageId: z.string().describe("The ID of the email to delete") 
+        {
+            messageId: z.string().describe("The ID of the email to delete")
         },
         // Callback with single destructured args parameter
-        async ({ messageId }) => { 
+        async ({ messageId }) => {
+            logger.info({ tool: 'delete_email', args: { messageId } }, 'Handling delete_email request');
             try {
                 await gmail.users.messages.delete({ userId: 'me', id: messageId });
                 return { content: [{ type: "text" as const, text: `Email ${messageId} deleted successfully` }] };
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error deleting email: ${error.message}` }], isError: true }; }
+            } catch (error: any) {
+                logger.error({ tool: 'delete_email', error, args: { messageId } }, 'Error deleting email');
+                return { content: [{ type: "text" as const, text: `Error deleting email: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("list_email_labels", 
+    server.tool("list_email_labels",
         // Raw schema definition (empty object for no args)
         {},
         // Callback with single (unused) args parameter
-        async (_args) => { 
+        async (_args) => {
+            logger.info({ tool: 'list_email_labels', args: {} }, 'Handling list_email_labels request');
             try {
-                 const labelResults = await listLabels(gmail);
-                 const systemLabels = labelResults.system;
-                 const userLabels = labelResults.user;
+                const labelResults = await listLabels(gmail);
+                const systemLabels = labelResults.system;
+                const userLabels = labelResults.user;
 
-                 let text = `Found ${labelResults.count.total} labels (${labelResults.count.system} system, ${labelResults.count.user} user):\n\n`;
-                 if (systemLabels.length > 0) {
+                let text = `Found ${labelResults.count.total} labels (${labelResults.count.system} system, ${labelResults.count.user} user):\n\n`;
+                if (systemLabels.length > 0) {
                     text += "System Labels:\n" + systemLabels.map((l: GmailLabel) => `- ${l.name} (ID: ${l.id})`).join('\n') + "\n\n";
-                 }
-                 if (userLabels.length > 0) {
-                     text += "User Labels:\n" + userLabels.map((l: GmailLabel) => `- ${l.name} (ID: ${l.id})`).join('\n');
-                 }
-                 return { content: [{ type: "text" as const, text: text.trim() }] };
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error listing labels: ${error.message}` }], isError: true }; }
+                }
+                if (userLabels.length > 0) {
+                    text += "User Labels:\n" + userLabels.map((l: GmailLabel) => `- ${l.name} (ID: ${l.id})`).join('\n');
+                }
+                return { content: [{ type: "text" as const, text: text.trim() }] };
+            } catch (error: any) {
+                logger.error({ tool: 'list_email_labels', error, args: {} }, 'Error listing labels');
+                return { content: [{ type: "text" as const, text: `Error listing labels: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("batch_modify_emails", 
+    server.tool("batch_modify_emails",
         // Raw schema definition
         {
             messageIds: z.array(z.string()).describe("Array of message IDs to modify"),
             addLabelIds: z.array(z.string()).optional().describe("Labels to add to the messages"),
-            removeLabelIds: z.array(z.string()).optional().describe("Labels to remove from the messages"), 
+            removeLabelIds: z.array(z.string()).optional().describe("Labels to remove from the messages"),
             batchSize: z.number().optional().describe("Number of messages to process in each batch")
         },
         // Callback with single args parameter
-        async (args) => { 
+        async (args) => {
+            logger.info({ tool: 'batch_modify_emails', args }, 'Handling batch_modify_emails request');
             try {
                 const requestBody: { addLabelIds?: string[]; removeLabelIds?: string[] } = {};
                 if (args.addLabelIds) requestBody.addLabelIds = args.addLabelIds;
                 if (args.removeLabelIds) requestBody.removeLabelIds = args.removeLabelIds;
 
                 if (!requestBody.addLabelIds && !requestBody.removeLabelIds) {
-                     throw new Error("No labels provided to add or remove in batch.");
+                    throw new Error("No labels provided to add or remove in batch.");
                 }
 
                 const { successes, failures } = await processBatches(
@@ -606,19 +612,23 @@ async function main() {
                 }
 
                 return { content: [{ type: "text" as const, text: resultText }] };
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error in batch modify: ${error.message}` }], isError: true }; }
+            } catch (error: any) {
+                logger.error({ tool: 'batch_modify_emails', error, args }, 'Error in batch modify');
+                return { content: [{ type: "text" as const, text: `Error in batch modify: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("batch_delete_emails", 
+    server.tool("batch_delete_emails",
         // Raw schema definition
         {
             messageIds: z.array(z.string()).describe("Array of message IDs to delete"),
             batchSize: z.number().optional().describe("Number of messages to process in each batch")
         },
         // Callback with single args parameter
-        async (args) => { 
+        async (args) => {
+            logger.info({ tool: 'batch_delete_emails', args }, 'Handling batch_delete_emails request');
             try {
-                 const { successes, failures } = await processBatches(
+                const { successes, failures } = await processBatches(
                     args.messageIds,
                     args.batchSize || 50,
                     async (batch) => {
@@ -633,20 +643,23 @@ async function main() {
                     }
                 );
 
-                 let resultText = `Batch delete operation complete.\n`;
-                 resultText += `Attempted: ${args.messageIds.length} messages.\n`;
-                 resultText += `Batches resulting in success (individual failures not reported): ${successes.length}\n`;
-                 if (failures.length > 0) {
+                let resultText = `Batch delete operation complete.\n`;
+                resultText += `Attempted: ${args.messageIds.length} messages.\n`;
+                resultText += `Batches resulting in success (individual failures not reported): ${successes.length}\n`;
+                if (failures.length > 0) {
                     resultText += `Batches/Items resulting in failure: ${failures.length}\n`;
                     resultText += `Failed item IDs/Errors (first few shown):\n`;
                     resultText += failures.slice(0, 5).map(f => `- Item: ${JSON.stringify(f.item)}, Error: ${f.error.message}`).join('\n');
-                 }
+                }
 
                 return { content: [{ type: "text" as const, text: resultText }] };
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error in batch delete: ${error.message}` }], isError: true }; }
+            } catch (error: any) {
+                logger.error({ tool: 'batch_delete_emails', error, args }, 'Error in batch delete');
+                return { content: [{ type: "text" as const, text: `Error in batch delete: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("create_label", 
+    server.tool("create_label",
         // Raw schema definition
         {
             name: z.string().describe("The name of the label to create"),
@@ -654,17 +667,21 @@ async function main() {
             labelListVisibility: z.string().optional().describe("The visibility of the label in the label list")
         },
         // Callback with single args parameter
-        async (args) => { 
+        async (args) => {
+            logger.info({ tool: 'create_label', args }, 'Handling create_label request');
             try {
-                 const result = await createLabel(gmail, args.name, {
-                     messageListVisibility: args.messageListVisibility,
-                     labelListVisibility: args.labelListVisibility,
-                 });
-                 return { content: [{ type: "text" as const, text: `Label created successfully:\nID: ${result.id}\nName: ${result.name}\nType: ${result.type}` }] };
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error creating label: ${error.message}` }], isError: true }; }
+                const result = await createLabel(gmail, args.name, {
+                    messageListVisibility: args.messageListVisibility,
+                    labelListVisibility: args.labelListVisibility,
+                });
+                return { content: [{ type: "text" as const, text: `Label created successfully:\nID: ${result.id}\nName: ${result.name}\nType: ${result.type}` }] };
+            } catch (error: any) {
+                logger.error({ tool: 'create_label', error, args }, 'Error creating label');
+                return { content: [{ type: "text" as const, text: `Error creating label: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("update_label", 
+    server.tool("update_label",
         // Raw schema definition
         {
             id: z.string().describe("The ID of the label to update"),
@@ -673,7 +690,8 @@ async function main() {
             labelListVisibility: z.string().optional().describe("The visibility of the label in the label list")
         },
         // Callback with single args parameter
-        async (args) => { 
+        async (args) => {
+            logger.info({ tool: 'update_label', args }, 'Handling update_label request');
             try {
                 const updates: Partial<GmailLabel> = {}; // Use partial type
                 if (args.name) updates.name = args.name;
@@ -686,23 +704,30 @@ async function main() {
 
                 const result = await updateLabel(gmail, args.id, updates);
                 return { content: [{ type: "text" as const, text: `Label updated successfully:\nID: ${result.id}\nName: ${result.name}\nType: ${result.type}` }] };
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error updating label: ${error.message}` }], isError: true }; }
+            } catch (error: any) {
+                logger.error({ tool: 'update_label', error, args }, 'Error updating label');
+                return { content: [{ type: "text" as const, text: `Error updating label: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("delete_label", 
+    server.tool("delete_label",
         // Raw schema definition
-        { 
-            id: z.string().describe("The ID of the label to delete") 
+        {
+            id: z.string().describe("The ID of the label to delete")
         },
         // Callback with single destructured args parameter
-        async ({ id }) => { 
+        async ({ id }) => {
+            logger.info({ tool: 'delete_label', args: { id } }, 'Handling delete_label request');
             try {
                 const result = await deleteLabel(gmail, id);
                 return { content: [{ type: "text" as const, text: result.message }] }; // deleteLabel returns { message: string }
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error deleting label: ${error.message}` }], isError: true }; }
+            } catch (error: any) {
+                logger.error({ tool: 'delete_label', error, args: { id } }, 'Error deleting label');
+                return { content: [{ type: "text" as const, text: `Error deleting label: ${error.message}` }], isError: true };
+            }
         });
 
-    server.tool("get_or_create_label", 
+    server.tool("get_or_create_label",
         // Raw schema definition
         {
             name: z.string().describe("The name of the label to get or create"),
@@ -710,7 +735,8 @@ async function main() {
             labelListVisibility: z.string().optional().describe("The visibility of the label in the label list")
         },
         // Callback with single args parameter
-        async (args) => { 
+        async (args) => {
+            logger.info({ tool: 'get_or_create_label', args }, 'Handling get_or_create_label request');
             try {
                 const result = await getOrCreateLabel(gmail, args.name, {
                     messageListVisibility: args.messageListVisibility,
@@ -718,7 +744,10 @@ async function main() {
                 });
                 const action = result.created ? 'created new' : 'found existing'; // Use 'created' flag from getOrCreateLabel
                 return { content: [{ type: "text" as const, text: `Successfully ${action} label:\nID: ${result.label.id}\nName: ${result.label.name}\nType: ${result.label.type}` }] };
-            } catch (error: any) { return { content: [{ type: "text" as const, text: `Error getting or creating label: ${error.message}` }], isError: true }; }
+            } catch (error: any) {
+                logger.error({ tool: 'get_or_create_label', error, args }, 'Error getting or creating label');
+                return { content: [{ type: "text" as const, text: `Error getting or creating label: ${error.message}` }], isError: true };
+            }
         });
 
     const app = express();
@@ -745,16 +774,16 @@ async function main() {
             const requestBody = req.method === 'POST' ? req.body : undefined;
             await transport.handleRequest(req, res, requestBody);
         } catch (error) {
-            console.error(`Error handling MCP request for session ${transport.sessionId}:`, error);
+            logger.error({ error, sessionId: transport.sessionId }, `Error handling MCP request for session ${transport.sessionId}`);
             if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
         }
     });
     app.listen(port, () => {
-        console.log(`Gmail MCP Server (Stateful Streamable HTTP) listening on port ${port}, endpoint /mcp`);
+        logger.info(`Gmail MCP Server (Stateful Streamable HTTP) listening on port ${port}, endpoint /mcp`);
     });
 }
 
 main().catch((error) => {
-    console.error('Server fatal error:', error);
+    logger.error({ error }, 'Server fatal error');
     process.exit(1);
 });

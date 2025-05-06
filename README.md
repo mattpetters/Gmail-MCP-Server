@@ -103,6 +103,10 @@ npx -y @smithery/cli install @gongrzhe/server-gmail-autoauth-mcp --client claude
 
 If you prefer using Docker:
 
+```bash
+docker build -f Dockerfile -t mcp/gmail . 
+```
+
 1. Authentication:
 ```bash
 docker run -i --rm \
