@@ -207,7 +207,7 @@ const SearchEmailsSchema = z.object({
         "Gmail search query (e.g., 'from:example@gmail.com'). " +
         "Available filters include: from:, to:, cc:, bcc:, subject:, label:, has:attachment, filename:, before:, after:, older_than:, newer_than:, is:, in:, category:. " 
     ),
-    maxResults: z.number().optional().describe("Maximum number of results to return"),
+    maxResults: z.number().optional().default(10).describe("Maximum number of results to return. Default is 10. Max is 100."),
 });
 
 // Updated schema to include removeLabelIds
@@ -448,27 +448,16 @@ async function main() {
         {
             query: z.string().describe(
                 "Gmail search query (e.g., 'from:example@gmail.com'). " +
-                "Available filters include: from:, to:, cc:, bcc:, subject:, label:, has:attachment, filename:, before:, after:, older_than:, newer_than:, is:, in:, category:. " +
-                "If you need to sort by date, use 'after:<date>'"
+                "Available filters include: from:, to:, cc:, bcc:, subject:, label:, has:attachment, filename:, before:, after:, older_than:, newer_than:, is:, in:, category:. " 
             ),
-            maxResults: z.number().optional().describe("Maximum number of results to return"),
+            maxResults: z.number().optional().default(20).describe("Maximum number of results to return. Default is 20. Max is 100."),
         },
         // Callback with single destructured args parameter
         async ({ query, maxResults }) => {
             logger.info({ tool: 'search_emails', args: { query, maxResults } }, 'Handling search_emails request');
             try {
-                // --- Server-side fix: Remove 'sort:recent' --- 
-                let processedQuery = query;
-                const sortRecentRegex = /\s*sort:recent\s*/gi; 
-                if (sortRecentRegex.test(processedQuery)) {
-                    processedQuery = processedQuery.replace(sortRecentRegex, ' ').trim(); 
-                    logger.warn({ tool: 'search_emails', originalQuery: query, processedQuery }, "Removed 'sort:recent' from query string.");
-                }
-                if (!processedQuery) {
-                    logger.warn({ tool: 'search_emails', originalQuery: query }, "Query became empty after removing 'sort:recent', defaulting to 'in:inbox'.");
-                    processedQuery = 'in:inbox'; 
-                }
-                // -----------------------------------------------
+                // Use the query directly without modifications
+                const processedQuery = query;
 
                 const listResponse = await gmail.users.messages.list({
                     userId: 'me',
