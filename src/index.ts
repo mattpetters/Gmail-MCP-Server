@@ -203,7 +203,10 @@ const ReadEmailSchema = z.object({
 });
 
 const SearchEmailsSchema = z.object({
-    query: z.string().describe("Gmail search query (e.g., 'from:example@gmail.com')"),
+    query: z.string().describe(
+        "Gmail search query (e.g., 'from:example@gmail.com'). " +
+        "Available filters include: from:, to:, cc:, bcc:, subject:, label:, has:attachment, filename:, before:, after:, older_than:, newer_than:, is:, in:, category:. " 
+    ),
     maxResults: z.number().optional().describe("Maximum number of results to return"),
 });
 
@@ -445,6 +448,7 @@ async function main() {
         {
             query: z.string().describe(
                 "Gmail search query (e.g., 'from:example@gmail.com'). " +
+                "Available filters include: from:, to:, cc:, bcc:, subject:, label:, has:attachment, filename:, before:, after:, older_than:, newer_than:, is:, in:, category:. " +
                 "If you need to sort by date, use 'after:<date>'"
             ),
             maxResults: z.number().optional().describe("Maximum number of results to return"),
@@ -609,6 +613,29 @@ async function main() {
             } catch (error: any) {
                 logger.error({ tool: 'list_email_labels', error, args: {} }, 'Error listing labels');
                 return { content: [{ type: "text" as const, text: `Error listing labels: ${error.message}` }], isError: true };
+            }
+        });
+
+    server.tool("get_gmail_filters_reference",
+        {}, // No arguments needed
+        async () => {
+            logger.info({ tool: 'get_gmail_filters_reference' }, 'Handling get_gmail_filters_reference request');
+            try {
+                const filePath = path.join(__dirname, 'gmail-search-ops.md');
+                if (!fs.existsSync(filePath)) {
+                    logger.error({ tool: 'get_gmail_filters_reference', filePath }, 'gmail-search-ops.md not found');
+                    return { content: [{ type: "text" as const, text: "Error: Gmail search operators reference file not found." }], isError: true };
+                }
+                const markdownContent = fs.readFileSync(filePath, 'utf8');
+                return {
+                    content: [{
+                        type: "text" as const,
+                        text: `Gmail Search Operators Reference:\n\n${markdownContent}`
+                    }]
+                };
+            } catch (error: any) {
+                logger.error({ tool: 'get_gmail_filters_reference', error }, 'Error reading Gmail search operators reference');
+                return { content: [{ type: "text" as const, text: `Error reading Gmail search operators reference: ${error.message}` }], isError: true };
             }
         });
 
